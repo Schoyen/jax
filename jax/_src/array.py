@@ -647,10 +647,16 @@ def _array_global_result_handler(global_aval, out_sharding, committed,
                                  is_out_sharding_from_xla):
   if global_aval.dtype == dtypes.float0:
     return lambda _: np.zeros(global_aval.shape, dtypes.float0)  # type: ignore
+
+  if hasattr(out_sharding, "_original_sharding"):
+    final_out_sharding = out_sharding._original_sharding
+  else:
+    final_out_sharding = out_sharding
+
   if core.is_opaque_dtype(global_aval.dtype):
     return global_aval.dtype._rules.global_sharded_result_handler(
-        global_aval, out_sharding, committed, is_out_sharding_from_xla)
-  return lambda bufs: ArrayImpl(global_aval, out_sharding, bufs,
+        global_aval, final_out_sharding, committed, is_out_sharding_from_xla)
+  return lambda bufs: ArrayImpl(global_aval, final_out_sharding, bufs,
                                 committed=committed, _skip_checks=True)
 pxla.global_result_handlers[(core.ShapedArray, pxla.OutputType.Array)] = _array_global_result_handler
 pxla.global_result_handlers[(core.ConcreteArray, pxla.OutputType.Array)] = _array_global_result_handler

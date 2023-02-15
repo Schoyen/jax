@@ -1662,9 +1662,8 @@ def _pjit_partial_eval(trace, *in_tracers,
               _allow_propagation_to_outputs=[True] * len(known_params['out_shardings']),
               _allow_compile_replicated=False)
       da = compiled._device_assignment
-      _, out_op_sharding_shardings = pxla.get_op_sharding_shardings_from_executable(
-          compiled.xla_executable, da, len(known_jaxpr.in_avals),
-          len(known_jaxpr.out_avals))
+      out_op_sharding_shardings = pxla.get_op_sharding_shardings_from_executable(
+          compiled.xla_executable, da, len(known_jaxpr.out_avals))
       assert len(out_op_sharding_shardings) == len(known_jaxpr.out_avals), (
           len(out_op_sharding_shardings), len(known_jaxpr.out_avals))
       out_op_shardings = [o._to_xla_op_sharding(a.ndim) for o, a in

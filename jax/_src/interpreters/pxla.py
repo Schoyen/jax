@@ -3330,9 +3330,7 @@ def _get_input_indices(
 
 def get_op_sharding_shardings_from_executable(
     xla_executable, device_assignment: Sequence[xc.Device],
-    num_in_avals: int, num_out_avals: int
-) -> Tuple[Sequence[sharding_internal.XLACompatibleSharding],
-           Sequence[sharding_internal.XLACompatibleSharding]]:
+    num_out_avals: int) -> Sequence[sharding_internal.XLACompatibleSharding]:
   from jax.experimental import pjit
 
   # When the device assignment only has 1 device, SPMD partitioner will not run.
@@ -3340,15 +3338,11 @@ def get_op_sharding_shardings_from_executable(
   # just return SingleDeviceShardings since we know the computation is running
   # only on 1 device.
   if len(device_assignment) == 1:
-    return ([sharding_internal.SingleDeviceSharding(device_assignment[0])
-             for _ in range(num_in_avals)],
-            [sharding_internal.SingleDeviceSharding(device_assignment[0])
-             for _ in range(num_out_avals)])
+    return [sharding_internal.SingleDeviceSharding(device_assignment[0])
+            for _ in range(num_out_avals)]
 
-  in_op_shardings, out_op_shardings = pjit._get_op_sharding_from_executable(xla_executable)
+  _, out_op_shardings = pjit._get_op_sharding_from_executable(xla_executable)
 
-  in_shardings_xla = [sharding_internal.OpShardingSharding(device_assignment, i)
-                      for i in in_op_shardings]
   out_shardings_xla = [sharding_internal.OpShardingSharding(device_assignment, o)
                        for o in out_op_shardings]
   # This condition happens when all the elements in the output tuple have the
@@ -3357,8 +3351,33 @@ def get_op_sharding_shardings_from_executable(
   # TODO(b/245667823): Remove this when XLA fixes this.
   if len(out_shardings_xla) == 1 and len(out_shardings_xla) < num_out_avals:
     out_shardings_xla = out_shardings_xla * num_out_avals
+
   assert len(out_shardings_xla) == num_out_avals
-  return in_shardings_xla, out_shardings_xla
+
+  return out_shardings_xla
+
+
+def _maybe_forward_shardings(
+    out_shardings_xla: Sequence[sharding_internal.XLACompatibleSharding],
+    in_shardings: Sequence[sharding_internal.XLACompatibleSharding],
+    in_avals: Sequence[ShapedArray],
+    out_avals: Sequence[ShapedArray],
+) -> Tuple[Sequence[sharding_internal.XLACompatibleSharding], bool]:
+  if len(out_avals) != len(in_avals):
+    return (out_shardings_xla, False)
+
+  forwarded_shardings = []
+  for xla_s, in_s, in_aval, out_aval in safe_zip(
+      out_shardings_xla, in_shardings, in_avals, out_avals):
+    if (are_op_shardings_equal(in_s._to_xla_op_sharding(in_aval.ndim),
+                               xla_s._to_xla_op_sharding(out_aval.ndim)) and
+        hasattr(in_s, "_original_sharding")):
+      forwarded_shardings.append(in_s)
+
+  if len(forwarded_shardings) != len(out_shardings_xla):
+    return (out_shardings_xla, False)
+
+  return (forwarded_shardings, True)
 
 
 # TODO(yashkatariya): Remove this function after `AUTO` can return shardings
@@ -3525,16 +3544,22 @@ class UnloadedMeshExecutable:
         out_shardings, are_out_shardings_from_xla = unzip2(out_shardings_tuple)
       elif out_shardings and any(_is_unspecified(o) for o in out_shardings):
         assert mesh is None
-        _, out_shardings_xla = get_op_sharding_shardings_from_executable(  # type: ignore
-            xla_executable, device_assignment,
-            len(global_in_avals), len(global_out_avals))
+        out_shardings_xla = get_op_sharding_shardings_from_executable(  # type: ignore
+            xla_executable, device_assignment, len(global_out_avals))
+        # Maybe forward shardings from input to output if all original
+        # out_shardings are unspecified.
+        are_forwarded = False
+        if all(_is_unspecified(o) for o in out_shardings):
+          # We will either forward all or None.
+          out_shardings_xla, are_forwarded = _maybe_forward_shardings(
+              out_shardings_xla, in_shardings, global_in_avals, global_out_avals)  # type: ignore
         orig_out_shardings = out_shardings
         out_shardings, are_out_shardings_from_xla = [], []  # type: ignore
         for xla_s, orig, aval in safe_zip(out_shardings_xla, orig_out_shardings,
                                           global_out_avals):
           if _is_unspecified(orig):
             out_shardings.append(xla_s)
-            are_out_shardings_from_xla.append(True)
+            are_out_shardings_from_xla.append(False if are_forwarded else True)
           else:
             if xla_extension_version >= 123 and not are_op_shardings_equal(
                 xla_s._to_xla_op_sharding(aval.ndim),  # type: ignore

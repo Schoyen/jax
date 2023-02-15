@@ -636,8 +636,10 @@ class PJitTest(jtu.BufferDonationTestCase):
     self.assertAllClose(z, x[jnp.newaxis] + y)
     self.assertAllClose(w, x)
     if config.jax_array:
-      self.assertEqual(z.sharding._op_sharding.tile_assignment_dimensions, [1, 2])
-      self.assertEqual(w.sharding._op_sharding.tile_assignment_dimensions, [2])
+      self.assertEqual(
+          z.sharding._to_xla_op_sharding(z.ndim).tile_assignment_dimensions, [1, 2])
+      self.assertEqual(
+          w.sharding._to_xla_op_sharding(w.ndim).tile_assignment_dimensions, [2])
     else:
       self.assertEqual(z.sharding_spec.sharding, (pxla.NoSharding(), pxla.Chunked([2])))
       self.assertEqual(w.sharding_spec.sharding, (pxla.Chunked([2]),))
@@ -1856,7 +1858,6 @@ class ArrayPjitTest(jtu.JaxTestCase):
 
     def _checks(out, input_data):
       self.assertIsInstance(out, array.ArrayImpl)
-      self.assertIsInstance(out.sharding, OpShardingSharding)
       self.assertEqual(out.shape, (8, 2))
       self.assertEqual(out.addressable_shards[0].data.shape, (2, 1))
       for s in out.addressable_shards:
@@ -2412,20 +2413,20 @@ class ArrayPjitTest(jtu.JaxTestCase):
 
     f = pjit(lambda x: x)
     out1 = f(arr)
-    self.assertIsInstance(out1.sharding, OpShardingSharding)
+    self.assertIsInstance(out1.sharding, NamedSharding)
     out1.sharding.devices_indices_map(shape)
-    cache_info1 = OpShardingSharding.devices_indices_map.cache_info()
+    cache_info1 = NamedSharding.devices_indices_map.cache_info()
 
     out2 = f(out1)
-    self.assertIsInstance(out2.sharding, OpShardingSharding)
+    self.assertIsInstance(out2.sharding, NamedSharding)
     out2.sharding.devices_indices_map(shape)
-    cache_info2 = OpShardingSharding.devices_indices_map.cache_info()
+    cache_info2 = NamedSharding.devices_indices_map.cache_info()
     self.assertEqual(cache_info2.hits, cache_info1.hits + 1)
 
     out3 = f(out2)
-    self.assertIsInstance(out3.sharding, OpShardingSharding)
+    self.assertIsInstance(out3.sharding, NamedSharding)
     out3.sharding.devices_indices_map(shape)
-    cache_info3 = OpShardingSharding.devices_indices_map.cache_info()
+    cache_info3 = NamedSharding.devices_indices_map.cache_info()
     self.assertEqual(cache_info3.hits, cache_info2.hits + 1)
 
   @jax_array(True)
@@ -2760,8 +2761,14 @@ class ArrayPjitTest(jtu.JaxTestCase):
 
     self.assertArraysEqual(f_out1, g_out1)
     self.assertArraysEqual(f_out2, g_out2)
-    self.assertEqual(f_out1.sharding, g_out1.sharding)
-    self.assertEqual(f_out2.sharding, g_out2.sharding)
+    self.assertTrue(
+        pxla.are_op_shardings_equal(
+            f_out1.sharding._to_xla_op_sharding(f_out1.ndim),
+            g_out1.sharding._to_xla_op_sharding(g_out1.ndim)))
+    self.assertTrue(
+        pxla.are_op_shardings_equal(
+            f_out2.sharding._to_xla_op_sharding(f_out2.ndim),
+            g_out2.sharding._to_xla_op_sharding(g_out2.ndim)))
 
   def test_pjit_on_different_default_device_with_uncommitted_inputs(self):
     if jax.device_count() < 2 or not jax.config.jax_array:
@@ -3385,6 +3392,21 @@ class ArrayPjitTest(jtu.JaxTestCase):
       ns2, _ = pxla.get_num_ways_dim_sharded(
           out2.sharding._to_xla_op_sharding(out2.ndim))
       self.assertListEqual(ns2, [2, 2, 1, 1])
+
+  def test_preserve_inp_named_sharding(self):
+    mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    shape = (8, 2)
+    inp = np.arange(prod(shape), dtype=jnp.int32).reshape(shape)
+    arr = jax.device_put(inp, NamedSharding(mesh, P('x', 'y')))
+    float_arr = arr.astype(jnp.float32)
+    self.assertIsInstance(float_arr.sharding, NamedSharding)
+    self.assertEqual(float_arr.dtype, jnp.float32)
+
+    out1, out2 = jax.jit(lambda x, y: (x * 2, y * 2))(arr, arr)
+    self.assertIsInstance(out1.sharding, NamedSharding)
+    self.assertIsInstance(out2.sharding, NamedSharding)
+    self.assertArraysEqual(out1, inp * 2)
+    self.assertArraysEqual(out2, inp * 2)
 
 
 class TempSharding(Sharding):
